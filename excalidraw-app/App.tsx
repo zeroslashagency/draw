@@ -106,6 +106,7 @@ import {
   exportToExcalidrawPlus,
 } from "./components/ExportToExcalidrawPlus";
 import { TopErrorBoundary } from "./components/TopErrorBoundary";
+import { AuthDialog } from "./components/AuthDialog";
 
 import {
   exportToBackend,
@@ -121,7 +122,8 @@ import {
   importUsernameFromLocalStorage,
 } from "./data/localStorage";
 
-import { loadFilesFromFirebase } from "./data/firebase";
+import { loadFilesFromSupabase } from "./data/supabase_storage";
+import { getCurrentUser, signOut } from "./data/supabase_scenes";
 import {
   LibraryIndexedDBAdapter,
   LibraryLocalStorageMigrationAdapter,
@@ -375,6 +377,15 @@ const ExcalidrawWrapper = () => {
 
   const [errorMessage, setErrorMessage] = useState("");
   const isCollabDisabled = isRunningInIframe();
+  const [authDialogOpen, setAuthDialogOpen] = useState(false);
+  const [currentUser, setCurrentUser] = useState<any>(null);
+
+  // Check auth state on mount
+  useEffect(() => {
+    getCurrentUser().then((user) => {
+      setCurrentUser(user);
+    });
+  }, []);
 
   const { editorTheme, appTheme, setAppTheme } = useHandleAppTheme();
 
@@ -475,7 +486,7 @@ const ExcalidrawWrapper = () => {
               fileIds.map((id) => [id, "loading"]),
             );
           }
-          loadFilesFromFirebase(
+          loadFilesFromSupabase(
             `${FIREBASE_STORAGE_PREFIXES.shareLinkFiles}/${data.id}`,
             data.key,
             fileIds,
@@ -1257,6 +1268,50 @@ const ExcalidrawWrapper = () => {
           />
         )}
       </Excalidraw>
+      <AuthDialog
+        open={authDialogOpen}
+        onClose={() => setAuthDialogOpen(false)}
+        onSuccess={() => {
+          getCurrentUser().then((user) => setCurrentUser(user));
+        }}
+      />
+      <div style={{ position: "fixed", top: 10, right: 10, zIndex: 9999 }}>
+        {currentUser ? (
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span style={{ fontSize: "0.9rem" }}>{currentUser.email}</span>
+            <button
+              onClick={async () => {
+                await signOut();
+                setCurrentUser(null);
+              }}
+              style={{
+                padding: "0.5rem 1rem",
+                background: "#f44336",
+                color: "white",
+                border: "none",
+                borderRadius: "4px",
+                cursor: "pointer",
+              }}
+            >
+              Sign Out
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setAuthDialogOpen(true)}
+            style={{
+              padding: "0.5rem 1rem",
+              background: "#6965db",
+              color: "white",
+              border: "none",
+              borderRadius: "4px",
+              cursor: "pointer",
+            }}
+          >
+            Sign In
+          </button>
+        )}
+      </div>
     </div>
   );
 };

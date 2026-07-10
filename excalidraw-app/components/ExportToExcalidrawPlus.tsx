@@ -1,5 +1,4 @@
 import React from "react";
-import { uploadBytes, ref } from "firebase/storage";
 import { nanoid } from "nanoid";
 
 import { trackEvent } from "@excalidraw/excalidraw/analytics";
@@ -27,7 +26,8 @@ import type {
 
 import { FILE_UPLOAD_MAX_BYTES } from "../app_constants";
 import { encodeFilesForUpload } from "../data/FileManager";
-import { loadFirebaseStorage, saveFilesToFirebase } from "../data/firebase";
+import { saveFilesToSupabase } from "../data/supabase_storage";
+import { supabase } from "../data/supabase";
 
 export const exportToExcalidrawPlus = async (
   elements: readonly NonDeletedExcalidrawElement[],
@@ -35,8 +35,6 @@ export const exportToExcalidrawPlus = async (
   files: BinaryFiles,
   name: string,
 ) => {
-  const storage = await loadFirebaseStorage();
-
   const id = `${nanoid(12)}`;
 
   const encryptionKey = (await generateEncryptionKey())!;
@@ -52,13 +50,17 @@ export const exportToExcalidrawPlus = async (
     },
   );
 
-  const storageRef = ref(storage, `/migrations/scenes/${id}`);
-  await uploadBytes(storageRef, blob, {
-    customMetadata: {
-      data: JSON.stringify({ version: 2, name }),
-      created: Date.now().toString(),
-    },
-  });
+  // Upload to Supabase storage
+  const { error: uploadError } = await supabase.storage
+    .from("excalidraw-files")
+    .upload(`/migrations/scenes/${id}`, blob, {
+      contentType: MIME_TYPES.binary,
+      upsert: true,
+    });
+
+  if (uploadError) {
+    throw uploadError;
+  }
 
   const filesMap = new Map<FileId, BinaryFileData>();
   for (const element of elements) {
@@ -74,10 +76,10 @@ export const exportToExcalidrawPlus = async (
       maxBytes: FILE_UPLOAD_MAX_BYTES,
     });
 
-    await saveFilesToFirebase({
-      prefix: `/migrations/files/scenes/${id}`,
-      files: filesToUpload,
-    });
+    await saveFilesToSupabase(
+      `/migrations/files/scenes/${id}`,
+      filesToUpload,
+    );
   }
 
   window.open(
