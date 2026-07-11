@@ -1,13 +1,6 @@
 import {
-  compressData,
-  decompressData,
-} from "@excalidraw/excalidraw/data/encode";
-import {
-  decryptData,
   generateEncryptionKey,
-  IV_LENGTH_BYTES,
 } from "@excalidraw/excalidraw/data/encryption";
-import { serializeAsJSON } from "@excalidraw/excalidraw/data/json";
 import { isInvisiblySmallElement } from "@excalidraw/element";
 import { isInitializedImageElement } from "@excalidraw/element";
 import { t } from "@excalidraw/excalidraw/i18n";
@@ -37,6 +30,7 @@ import {
 
 import { encodeFilesForUpload } from "./FileManager";
 import { saveFilesToSupabase } from "./supabase_storage";
+import { createShareableLink, loadSceneByToken } from "./supabase_scenes";
 
 import type { WS_SUBTYPES } from "../app_constants";
 
@@ -61,9 +55,6 @@ export const getSyncableElements = (
   elements.filter((element) =>
     isSyncableElement(element),
   ) as SyncableExcalidrawElement[];
-
-const BACKEND_V2_GET = import.meta.env.VITE_APP_BACKEND_V2_GET_URL;
-const BACKEND_V2_POST = import.meta.env.VITE_APP_BACKEND_V2_POST_URL;
 
 const generateRoomId = async () => {
   const buffer = new Uint8Array(ROOM_ID_BYTES);
@@ -163,80 +154,26 @@ export const getCollaborationLink = (data: {
   return `${window.location.origin}${window.location.pathname}#room=${data.roomId},${data.roomKey}`;
 };
 
-/**
- * Decodes shareLink data using the legacy buffer format.
- * @deprecated
- */
-const legacy_decodeFromBackend = async ({
-  buffer,
-  decryptionKey,
-}: {
-  buffer: ArrayBuffer;
-  decryptionKey: string;
-}) => {
-  let decrypted: ArrayBuffer;
-
-  try {
-    // Buffer should contain both the IV (fixed length) and encrypted data
-    const iv = buffer.slice(0, IV_LENGTH_BYTES);
-    const encrypted = buffer.slice(IV_LENGTH_BYTES, buffer.byteLength);
-    decrypted = await decryptData(new Uint8Array(iv), encrypted, decryptionKey);
-  } catch (error: any) {
-    // Fixed IV (old format, backward compatibility)
-    const fixedIv = new Uint8Array(IV_LENGTH_BYTES);
-    decrypted = await decryptData(fixedIv, buffer, decryptionKey);
-  }
-
-  // We need to convert the decrypted array buffer to a string
-  const string = new window.TextDecoder("utf-8").decode(
-    new Uint8Array(decrypted),
-  );
-  const data: ImportedDataState = JSON.parse(string);
-
-  return {
-    elements: data.elements || null,
-    appState: data.appState || null,
-  };
-};
-
 export const importFromBackend = async (
   id: string,
   decryptionKey: string,
 ): Promise<ImportedDataState> => {
   try {
-    const response = await fetch(`${BACKEND_V2_GET}${id}`);
+    // Load scene from Supabase using token
+    const result = await loadSceneByToken(id, decryptionKey);
 
-    if (!response.ok) {
+    if (!result) {
       window.alert(t("alerts.importBackendFailed"));
       return {};
     }
-    const buffer = await response.arrayBuffer();
 
-    try {
-      const { data: decodedBuffer } = await decompressData(
-        new Uint8Array(buffer),
-        {
-          decryptionKey,
-        },
-      );
-      const data: ImportedDataState = JSON.parse(
-        new TextDecoder().decode(decodedBuffer),
-      );
-
-      return {
-        elements: data.elements || null,
-        appState: data.appState || null,
-      };
-    } catch (error: any) {
-      console.warn(
-        "error when decoding shareLink data using the new format:",
-        error,
-      );
-      return legacy_decodeFromBackend({ buffer, decryptionKey });
-    }
+    return {
+      elements: result.elements || null,
+      appState: result.appState || null,
+    };
   } catch (error: any) {
+    console.error("Error loading scene from Supabase:", error);
     window.alert(t("alerts.importBackendFailed"));
-    console.error(error);
     return {};
   }
 };
@@ -252,14 +189,8 @@ export const exportToBackend = async (
 ): Promise<ExportToBackendResult> => {
   const encryptionKey = await generateEncryptionKey("string");
 
-  const payload = await compressData(
-    new TextEncoder().encode(
-      serializeAsJSON(elements, appState, files, "database"),
-    ),
-    { encryptionKey },
-  );
-
   try {
+    // Upload files to Supabase storage
     const filesMap = new Map<FileId, BinaryFileData>();
     for (const element of elements) {
       if (isInitializedImageElement(element) && files[element.fileId]) {
@@ -267,40 +198,42 @@ export const exportToBackend = async (
       }
     }
 
-    const filesToUpload = await encodeFilesForUpload({
-      files: filesMap,
+    // Create shareable link using Supabase
+    const { id, token } = await createShareableLink(
+      elements,
+      appState,
       encryptionKey,
-      maxBytes: FILE_UPLOAD_MAX_BYTES,
-    });
+    );
 
-    const response = await fetch(BACKEND_V2_POST, {
-      method: "POST",
-      body: payload.buffer,
-    });
-    const json = await response.json();
-    if (json.id) {
-      const url = new URL(window.location.href);
-      // We need to store the key (and less importantly the id) as hash instead
-      // of queryParam in order to never send it to the server
-      url.hash = `json=${json.id},${encryptionKey}`;
-      const urlString = url.toString();
+    // Upload files if any
+    if (filesMap.size > 0) {
+      const filesToUpload = await encodeFilesForUpload({
+        files: filesMap,
+        encryptionKey,
+        maxBytes: FILE_UPLOAD_MAX_BYTES,
+      });
 
       await saveFilesToSupabase(
-        `/files/shareLinks/${json.id}`,
+        `/files/shareLinks/${id}`,
         filesToUpload,
       );
+    }
 
-      return { url: urlString, errorMessage: null };
-    } else if (json.error_class === "RequestTooLargeError") {
+    // Build URL with token and encryption key
+    const url = new URL(window.location.href);
+    url.hash = `json=${token},${encryptionKey}`;
+    const urlString = url.toString();
+
+    return { url: urlString, errorMessage: null };
+  } catch (error: any) {
+    console.error("Error creating shareable link:", error);
+
+    if (error.message?.includes("too large") || error.message?.includes("RequestTooLargeError")) {
       return {
         url: null,
         errorMessage: t("alerts.couldNotCreateShareableLinkTooBig"),
       };
     }
-
-    return { url: null, errorMessage: t("alerts.couldNotCreateShareableLink") };
-  } catch (error: any) {
-    console.error(error);
 
     return { url: null, errorMessage: t("alerts.couldNotCreateShareableLink") };
   }

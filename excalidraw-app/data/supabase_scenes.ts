@@ -195,3 +195,101 @@ export async function signOut() {
   const { error } = await supabase.auth.signOut();
   if (error) throw error;
 }
+
+// Shareable link functions
+export async function createShareableLink(
+  elements: readonly ExcalidrawElement[],
+  appState: Partial<AppState>,
+  encryptionKey: string,
+): Promise<{ id: string; token: string }> {
+  const { data: { user } } = await supabase.auth.getUser();
+  
+  // Encrypt and store scene data
+  const json = JSON.stringify({ elements, appState });
+  const encoded = new TextEncoder().encode(json);
+  const { encryptedBuffer } = await encryptData(encryptionKey, encoded);
+  const sceneData = btoa(String.fromCharCode(...new Uint8Array(encryptedBuffer)));
+
+  // Generate random token for shareable link
+  const tokenBytes = new Uint8Array(32);
+  window.crypto.getRandomValues(tokenBytes);
+  const token = Array.from(tokenBytes)
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
+
+  // Create scene
+  const { data: scene, error: sceneError } = await supabase
+    .from("scenes")
+    .insert({
+      name: "Shared Scene",
+      user_id: user?.id || null,
+      scene_data: sceneData,
+      version: getSceneVersion(elements),
+    })
+    .select()
+    .single();
+
+  if (sceneError) throw sceneError;
+
+  // Create public share
+  const { data: share, error: shareError } = await supabase
+    .from("scene_shares")
+    .insert({
+      scene_id: scene.id,
+      token,
+      permission: "view",
+    })
+    .select()
+    .single();
+
+  if (shareError) throw shareError;
+
+  return { id: scene.id, token };
+}
+
+export async function loadSceneByToken(
+  token: string,
+  encryptionKey: string,
+): Promise<{ elements: readonly ExcalidrawElement[]; appState: Partial<AppState> } | null> {
+  // Find the share by token
+  const { data: share, error: shareError } = await supabase
+    .from("scene_shares")
+    .select("scene_id")
+    .eq("token", token)
+    .single();
+
+  if (shareError || !share) return null;
+
+  // Load the scene
+  const { data: scene, error: sceneError } = await supabase
+    .from("scenes")
+    .select("scene_data")
+    .eq("id", share.scene_id)
+    .single();
+
+  if (sceneError || !scene) return null;
+
+  try {
+    // Decrypt scene data
+    const binaryStr = atob(scene.scene_data);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+    const decrypted = await decryptData(
+      bytes.slice(0, 12),
+      bytes.slice(12),
+      encryptionKey,
+    );
+    const decoded = new TextDecoder("utf-8").decode(new Uint8Array(decrypted));
+    const parsed = JSON.parse(decoded);
+    
+    return {
+      elements: parsed.elements || [],
+      appState: parsed.appState || {},
+    };
+  } catch (err) {
+    console.error("Failed to decrypt scene:", err);
+    return null;
+  }
+}
